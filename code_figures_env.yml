@@ -43,10 +43,10 @@ dependencies:
   - brotli-python=1.2.0=py314hcd2bdb6_4
   - bzip2=1.0.8=hda65f42_10
   - c-ares=1.34.8=hebe6cf0_2
-  - ca-certificates=2026.10.19=hbd8a1cb_0
+  - ca-certificates=2026.10.23=hbd8a1cb_0
   - cached-property=2.0.1=pyhcf101f3_0
   - cached_property=2.0.1=pyhcf101f3_0
-  - certifi=2026.10.23=pyhd8ed1ab_0
+  - certifi=2026.10.23=pyhd8ed1ab_3
   - charset-normalizer=3.5.2=h1114479_0
   - chex=0.1.92=pyhc364b38_0
   - click=8.5.0=pyh5ded981_0
@@ -328,6 +328,7 @@ dependencies:
   - sparse=0.19.2=pyhc364b38_0
   - sparsecca=0.3.1=pyhd8ed1ab_0
   - stack_data=0.6.3=pyhd8ed1ab_1
+  - statannotations=0.7.2=pyhcf101f3_10
   - statsmodels=0.15.0=np2py314h8874201_2
   - svt-av1=4.2.0=hd2095e1_1
   - sympy=1.14.0=pyh2585a3b_106

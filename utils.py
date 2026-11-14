@@ -1,15 +1,26 @@
+from types import SimpleNamespace
+
+import matplotlib.patches as patches
 import numpy as np
 import pandas as pd
+import pertpy as pt
 import scanpy as sc
 import seaborn as sns
 import matplotlib.pyplot as plt
 import statsmodels.api as sm
+from matplotlib.collections import PathCollection
+from matplotlib.colors import to_rgb
+from matplotlib.lines import Line2D
+from matplotlib.patches import ConnectionPatch, Patch
+from matplotlib.ticker import PercentFormatter
+from matplotlib.transforms import ScaledTranslation, blended_transform_factory
 from scipy import stats
 from scipy.sparse import issparse
 from sklearn.metrics.cluster import adjusted_rand_score
 from sklearn.utils import sparsefuncs
 from mudata import MuData
 import knn_normalization as knn
+from statannotations.Annotator import Annotator
 
 
 def pca_neighbors_umap(data, n_comps=None, n_neighbors=15):
@@ -530,3 +541,483 @@ def remove_very_high_total_counts_by_sample(protein_data, rna_data, sample_colum
         protein_data = protein_data[~cells_to_remove].copy()
         rna_data = rna_data[~cells_to_remove].copy()
     return protein_data, rna_data
+
+
+# ---------------------------------------------------------------------------
+# Figure 4 (CITE-seq CRC annotation)
+# ---------------------------------------------------------------------------
+BASE_DIR = "/groups/nils/members/javier/Immune_colon/annotation_CITE-seq_CRC"
+DATA_DIR, FIG_DIR = f"{BASE_DIR}/data", f"{BASE_DIR}/figures"
+L1, L2 = "annotation_combined_v1_l1", "annotation_combined_v1_l2"
+
+CELL_TYPES_PALETTE = {
+    "Treg": "#B5DEAD", "CD4 T": "#F75C03", "CD8 T": "#157F1F", "innate CD8 T": "#76B041",
+    "NK": "#B2ABF2", "CD16 NK": "#2708A0", "CD16- NK": "#CCE6F4", "B": "#6EA4BF",
+    "naive/transitional B": "#48ACF0", "germinal B": "#3A5683", "Plasma": "#1A181B", "DC": "#CBC0AD",
+    "cDC": "#FFD166", "pDC": "#BA2D0B", "DC, activated": "#FFCAD4", "Macro": "#15616D",
+    "Mono-Macro": "#D8DDEF", "Mono": "#A833B9", "Mast": "#7B2D26", "Myeloid": "#2708A0"}
+MARKERS = ["CD4", "CD5", "CD3", "CD95", "CD278", "CD25", "CD8a", "CD103", "CD335",
+           "CD20", "CD19", "CD21", "CD27", "CD38", "CD39", "CD33", "CD11c"]
+SIMPLE_MAPPING = {"CD4 T": "CD4 T & Treg", "Treg": "CD4 T & Treg", "CD8 T": "CD8 T", "Myeloid": "Myeloid"}
+SIMPLE_COLORS = ["#F75C03", "#157F1F", "#B2BEB5", "#2708A0"]
+TUMOR_ADJACENT_PALETTE = {"tumor": "#E9A820", "adjacent": "#2A9D8F"}
+
+SCCODA_MIN_CELLS = 65
+SCCODA_GROUPS = {
+    "T cells": ["CD4 T", "Treg", "CD8 T"],
+    "NK cells": ["CD16 NK", "CD16- NK"],
+    "B cells": ["naive/transitional B", "germinal B"],
+    "Plasma cells": ["Plasma IgA+", "Plasma IgG+", "Plasma IgA+ IgG+"],
+}
+
+# (cell type, genes) blocks of the DESeq heatmap, per annotation column the DESeq CSVs were computed with
+DESEQ_BLOCKS = {
+    L1: [("Plasma", ["CCND2", "IGHG1", "IGHG2", "IGHG3", "HSPA1A"]),
+         ("CD8 T", ["CXCL13", "CCL3", "GZMK", "GZMB", "CTLA4", "HLA-DRA", "FABP5", "DNAJB1", "SERPINH1", "HSPH1",
+                    "HSP90AA1", "BAG3", "CD82", "CD27", "RBPJ", "NR4A2", "SPRY1"]),
+         ("CD4 T", ["CXCL13", "TNFRSF18", "DUSP4", "HSPA1B", "HSPH1", "HSP90AA1", "HSPD1", "RPS29", "AL138963.3"])],
+    "Smooth_cell_type": [
+        ("Plasma", ["GNLY", "IGHG1", "CCND2", "IGHG3", "NKG7", "LTB", "FYB1", "CD2", "CD3E", "CD3D", "IGHG4", "CXCR4",
+                    "HLA-DRB1", "IL32", "TAGAP", "RHOB", "JCHAIN", "TIMP1", "RPL36A", "CCL3", "GPR15", "AMPD1"]),
+        ("CD8 T", ["CXCL13", "HSPA1A", "SERPINH1", "CTLA4", "ZFAND2A", "CD82", "CD27", "FABP5", "RBPJ", "DNAJB1",
+                   "BATF", "GZMK", "HSPH1", "HLA-DRA", "HSPB1", "HSP90AA1", "HOPX", "LINC01871", "CCL4L2", "MAP3K8",
+                   "KIR2DL4", "NR4A2", "XCL2", "PTGER2", "XCL1"]),
+        ("CD4 T", ["CXCL13", "HSPA1B", "HSP90AA1"])],
+}
+
+SIGNATURES = {"literature_cytotoxicity_signature": "Cytotoxicity", "literature_exhaustion_signature": "Exhaustion"}
+SIGNATURE_COLORS = {"Cytotoxicity": "#d6604d", "Exhaustion": "#4393c3"}
+
+FIG_W_IN, FIG_H_IN = 178 / 25.4, 8.6   # Bioinformatics double-column width
+ROW_HEIGHTS = [1.6, 1.0, 1.05, 1.5]    # rows: A|B, C, D, E|F
+FS = 8                                 # one font size for all text
+FIG_RCPARAMS = {
+    "font.size": FS, "axes.titlesize": FS, "axes.labelsize": FS, "xtick.labelsize": FS, "ytick.labelsize": FS,
+    "legend.fontsize": FS, "legend.title_fontsize": FS, "figure.titlesize": FS,
+    "text.usetex": False, "font.family": "sans-serif", "font.sans-serif": ["DejaVu Sans"],
+    "mathtext.fontset": "dejavusans", "axes.linewidth": 0.6,
+    "xtick.major.width": 0.6, "ytick.major.width": 0.6, "xtick.major.size": 2.5, "ytick.major.size": 2.5,
+    "axes.spines.top": False, "axes.spines.right": False, "lines.linewidth": 0.8, "patch.linewidth": 0.5,
+    "pdf.fonttype": 42,  # editable text in the PDF
+}
+
+
+def load_data():
+    protein = sc.read_h5ad(f"{DATA_DIR}/CRC_CITE-seq_batch_corrected_adata_v35.h5ad")
+    rna = sc.read_h5ad(f"{DATA_DIR}/rna_v15.h5ad")
+    return protein, rna
+
+
+def add_simplified_annotations(protein):
+    """Add the simplified CITE-seq / scRNA-seq annotations used in panel B. Returns (order, {category: color})."""
+    for new, src in [("protein_annotation_simplified", L1), ("scrnaseq_annotation_simplified", "Smooth_cell_type")]:
+        protein.obs[new] = protein.obs[src].astype(str).map(SIMPLE_MAPPING).fillna("Others").astype("category")
+        protein.uns[f"{new}_colors"] = SIMPLE_COLORS
+    col = "protein_annotation_simplified"
+    protein.obs[col] = protein.obs[col].cat.reorder_categories(["CD4 T & Treg", "CD8 T", "Others", "Myeloid"])
+    order = list(protein.obs[col].cat.categories)
+    return order, dict(zip(order, protein.uns[f"{col}_colors"]))
+
+
+def get_values(adata, name):
+    """Values of an obs column or of a gene/protein."""
+    if name in adata.obs.columns:
+        return adata.obs[name].values
+    if name not in adata.var_names:
+        raise ValueError(f"{name} not found in obs or var_names")
+    X = adata[:, name].X
+    return np.asarray(X.toarray() if issparse(X) else X).ravel()
+
+
+def prepare_sccoda(protein):
+    """scCODA object without the L2 cell types that have fewer than SCCODA_MIN_CELLS cells."""
+    counts = protein.obs[L2].value_counts()
+    sub = protein[protein.obs[L2].isin(counts[counts >= SCCODA_MIN_CELLS].index)].copy()
+    sub.obs[L2] = sub.obs[L2].cat.remove_unused_categories()
+    return pt.tl.Sccoda().load(sub, type="cell_level", generate_sample_level=True, cell_type_identifier=L2,
+                               sample_identifier="sample", covariate_obs=["origin"])
+
+
+def sccoda_long_table(sccoda_data):
+    """Relative abundance per sample, long format. Returns (df_long, cell_types)."""
+    coda = sccoda_data["coda"]
+    cell_cols = list(coda.var_names)
+    X = coda.X.toarray() if issparse(coda.X) else coda.X
+    df = pd.DataFrame(X, index=coda.obs_names, columns=cell_cols)
+    df = df.div(df.sum(axis=1), axis=0)
+    df["origin"] = coda.obs["origin"].values
+    return df.melt(id_vars="origin", var_name="cell_type", value_name="rel_abundance"), cell_cols
+
+
+def marker_means_by_cell_type(protein):
+    """Mean protein expression of MARKERS per L1 cell type (pDC excluded)."""
+    pm = protein[protein.obs[L1] != "pDC", MARKERS]
+    X = pm.X.toarray() if issparse(pm.X) else np.asarray(pm.X)
+    df = pd.DataFrame(X, index=pm.obs_names, columns=pm.var_names)
+    return df.groupby(pm.obs[L1].values, observed=True).mean()
+
+
+def prepare_deseq_heatmap_data(protein, annotation=L1):
+    """Per-gene z-scored log2 DESeq-normalized matrix: tumor samples, a blank row, adjacent samples (rows) by
+    the genes of each DESEQ_BLOCKS cell type separated by blank columns. Returns (mat, labels, spans, rows, tumor, adjacent)."""
+    origin = protein.obs[["sample", "origin"]].astype(str).drop_duplicates().set_index("sample")["origin"].str.lower()
+    tumor, adjacent = sorted(origin[origin == "tumor"].index), sorted(origin[origin == "adjacent"].index)
+    rows = tumor + [" "] + adjacent
+
+    mat, labels, spans = [], [], []
+    for cell_type, genes in DESEQ_BLOCKS[annotation]:
+        df = pd.read_csv(f"{DATA_DIR}/DESeq-normalized_{cell_type}_{annotation}_origin_rna.csv", index_col=0)
+        # pseudobulk index is "{sample}_{origin}": strip the suffix
+        sfx = "_" + df["origin"].astype(str)
+        df.index = [i[:-len(s)] if i.endswith(s) else i for i, s in zip(df.index, sfx)]
+        m = np.log2(df.drop(columns="origin", errors="ignore").reindex(columns=genes) + 1).reindex(rows)
+        mat += [((m - m.mean()) / m.std()).values, np.full((len(rows), 1), np.nan)]
+        spans.append((len(labels), len(labels) + len(genes), cell_type))
+        labels += genes + [""]
+    return np.hstack(mat[:-1]), labels[:-1], spans, rows, tumor, adjacent
+
+
+def prepare_t_cells_tcr(protein):
+    """Treg / CD4 T / CD8 T cells with a detected TCR."""
+    t = protein[protein.obs[L1].isin(["Treg", "CD4 T", "CD8 T"])]
+    return t[t.obs["clonal_expansion"] != "no_TCR_detected"].copy()
+
+
+def prepare_rna_tumor_t_cells(rna):
+    """Tumor T cells with a detected TCR from samples p026t and p042t."""
+    t = rna[(rna.obs["origin"] == "tumor") & rna.obs[L1].isin(["Treg", "CD8 T", "CD4 T"])]
+    t = t[(t.obs["clonal_expansion"] != "no_TCR_detected") & t.obs["sample"].isin(["p026t", "p042t"])].copy()
+    t.uns["clonal_expansion_colors"] = ["#A9A3AC", "#C47FBD", "#6E2266"]
+    return t
+
+
+def prepare_figure_data(protein, rna):
+    order, colors = add_simplified_annotations(protein)
+    return SimpleNamespace(simple_order=order, simple_colors=colors, sccoda_data=prepare_sccoda(protein),
+                           t_cells_tcr=prepare_t_cells_tcr(protein), rna_t=prepare_rna_tumor_t_cells(rna))
+
+
+def _hide_blank_ticks(ax, x_labels, y_labels):
+    for axis, labs in [(ax.xaxis, x_labels), (ax.yaxis, y_labels)]:
+        for tick, lab in zip(axis.get_major_ticks(), labs):
+            if not lab.strip():
+                tick.tick1line.set_visible(False)
+
+
+def _label_stacked_pct(ax, comp, colors, fontsize=FS, min_pct=5, only=None, rotation=0):
+    """Percentage inside each stacked segment (>= min_pct); `only` restricts it to one category."""
+    for x, (_, row) in enumerate(comp.T.iterrows()):
+        bottom = 0
+        for cat, val, col in zip(row.index, row.values, colors):
+            if val >= min_pct and only in (None, cat):
+                r, g, b = to_rgb(col)
+                ax.text(x, bottom + val / 2, f"{val:.0f}%", ha="center", va="center", fontsize=fontsize,
+                        rotation=rotation, color="black" if 0.299 * r + 0.587 * g + 0.114 * b > 0.55 else "white")
+            bottom += val
+
+
+def panel_A(ax, protein):
+    df = marker_means_by_cell_type(protein)
+    sns.heatmap(df, cmap="RdBu_r", center=0, vmin=-1, vmax=1, ax=ax,
+                cbar_kws={"ticks": [-1, 0, 1], "pad": 0.03, "fraction": 0.06})
+    ax.set(xlabel="", ylabel="", title="CITE-seq-based cell type annotations")
+    ax.set_xticks(np.arange(df.shape[1]) + 0.5)
+    ax.set_xticklabels(df.columns, rotation=90, ha="center")
+    ax.set_yticks(np.arange(df.shape[0]) + 0.5)
+    ax.set_yticklabels(df.index, rotation=0, ha="right", fontweight="bold")
+    for t in ax.get_yticklabels():
+        t.set_color(CELL_TYPES_PALETTE.get(t.get_text(), "black"))
+    ax.tick_params(length=0)
+    cbar = ax.collections[0].colorbar
+    cbar.set_ticklabels(["<-1", "0", ">1"])  # values are clipped at vmin/vmax
+    cbar.ax.tick_params(labelsize=FS, length=2)
+    cbar.set_label("Mean scaled \nprotein expression", labelpad=2)
+    cbar.outline.set_visible(False)
+
+
+def panel_B(fig, placeholder, protein, d, left_pad=0.38, gap=0.30, bar_w=0.45, bar_right=0.30, leg_x=0.36,
+            leg_w=0.68, leg_up=0.12, extend_top=0.0, extend_bottom=0.06, mid_shift=0.06, connector_pad=0.08):
+    """CD4 vs CD8a scatter with the gated CD8 T / CD4 T & Treg regions and stacked bars of their composition,
+    placed by hand (all lengths in inches) inside the `placeholder` axes. Returns (scatter, CD8 bar, CD4 bar) axes."""
+    order, colors = d.simple_order, d.simple_colors
+    W, H = FIG_W_IN, FIG_H_IN
+    p = placeholder.get_position()
+    x0, y0, w, h = p.x0 * W, p.y0 * H, p.width * W, p.height * H
+    placeholder.remove()
+
+    def ax_in(l, b, ww, hh):
+        return fig.add_axes([l / W, b / H, ww / W, hh / H])
+
+    # gating
+    cd4, cd8 = get_values(protein, "CD4"), get_values(protein, "CD8a")
+    c4_x, c4_y = 0.4, 0.5   # CD4 T region: CD4 > c4_x, CD8a < c4_y
+    c8_x, c8_y = 0.2, 0.7   # CD8 T region: CD4 < c8_x, CD8a > c8_y
+    mask_cd8, mask_cd4 = (cd8 > c8_y) & (cd4 < c8_x), (cd8 < c4_y) & (cd4 > c4_x)
+    xlim, ylim = (-2.3, 3), (-2.5, 3.6)
+
+    # axes positions
+    sc_left = x0 + left_pad
+    sc_w = w - left_pad - gap - bar_w - max(bar_right, leg_x + leg_w)
+    bar_x = sc_left + sc_w + gap
+
+    def y_in(v):  # scatter data y -> figure inches
+        return y0 + (v - ylim[0]) / (ylim[1] - ylim[0]) * h
+
+    # the lower bar's title needs vertical room: pull the bars in at the middle if necessary
+    cd4_title = "CD4 T &\nTreg region"
+    title_room = (FS * 1.25 * 2 + plt.rcParams["axes.titlepad"] + 3) / 72
+    shift = max(mid_shift, (title_room - (y_in(c8_y) - y_in(c4_y))) / 2)
+    cd8_top, cd8_bottom = y0 + h + extend_top, y_in(c8_y) + shift
+    cd4_top, cd4_bottom = y_in(c4_y) - shift, y0 - extend_bottom
+    offset = (y_in(c8_y) + y_in(c4_y)) / 2 - (cd8_bottom + cd4_top) / 2   # keep the gap centered on the corners
+    cd8_bottom, cd4_top = cd8_bottom + offset, cd4_top + offset
+
+    ax_sc = ax_in(sc_left, y0, sc_w, h)
+    ax_cd8 = ax_in(bar_x, cd8_bottom, bar_w, cd8_top - cd8_bottom)
+    ax_cd4 = ax_in(bar_x, cd4_bottom, bar_w, cd4_top - cd4_bottom)
+    ax_leg = ax_in(bar_x + bar_w + leg_x, y0, leg_w, cd8_top - y0 + leg_up)
+    ax_leg.axis("off")
+
+    # scatter
+    pt_colors = protein.obs["protein_annotation_simplified"].astype(str).map(colors).values
+    ax_sc.scatter(cd4, cd8, s=0.8, c=pt_colors, linewidths=0, alpha=0.6, rasterized=True)
+    ax_sc.set_xlabel("CD4")
+    ax_sc.set_ylabel("CD8a", labelpad=-3)
+    ax_sc.set(xlim=xlim, ylim=ylim)
+    # dashed gates drawn unclipped; a white underlay on the edges lying on the spines lets the dashes show
+    rect = dict(linewidth=0.8, edgecolor="black", facecolor="none", linestyle="--", clip_on=False, zorder=5)
+    ax_sc.add_patch(patches.Rectangle((xlim[0], c8_y), c8_x - xlim[0], ylim[1] - c8_y, **rect))
+    ax_sc.add_patch(patches.Rectangle((c4_x, ylim[0]), xlim[1] - c4_x, c4_y - ylim[0], **rect))
+    under = dict(color="white", linewidth=0.8, solid_capstyle="butt", clip_on=False, zorder=4)
+    for xs, ys in [([c4_x, xlim[1]], [ylim[0]] * 2), ([xlim[1]] * 2, [ylim[0], c4_y]),
+                   ([xlim[0]] * 2, [c8_y, ylim[1]]), ([xlim[0], c8_x], [ylim[1]] * 2)]:
+        ax_sc.plot(xs, ys, **under)
+
+    # stacked bars: CITE vs RNA annotation of the cells in each region
+    bar_colors = [colors[c] for c in order]
+
+    def stacked_bar(ax, mask, title, only, show_x):
+        pct = lambda col: protein.obs[col][mask].value_counts(normalize=True).reindex(order).fillna(0) * 100
+        comp = pd.concat([pct("protein_annotation_simplified").rename("CITE"),
+                          pct("scrnaseq_annotation_simplified").rename("RNA")], axis=1)
+        comp.T.plot(kind="bar", stacked=True, ax=ax, width=0.7, legend=False, edgecolor="none", color=bar_colors)
+        _label_stacked_pct(ax, comp, bar_colors, only=only, rotation=90)
+        ax.set(ylim=(0, 100), yticks=[0, 50, 100], title=title, xlabel="", ylabel="% of cells" if show_x else "")
+        ax.spines["left"].set_visible(False)
+        ax.spines["right"].set_visible(True)
+        ax.yaxis.tick_right()
+        ax.yaxis.set_label_position("right")
+        if show_x:
+            plt.setp(ax.get_xticklabels(), rotation=0, ha="center")
+            for lab, dx in zip(ax.get_xticklabels(), (-3, 3)):   # nudge CITE / RNA apart
+                lab.set_transform(lab.get_transform() + ScaledTranslation(dx / 72, 0, fig.dpi_scale_trans))
+            ax.set_xlabel("Annotation")
+        else:
+            ax.set_xticklabels([])
+            ax.tick_params(axis="x", length=0)
+
+    stacked_bar(ax_cd8, mask_cd8, "CD8 T region", "CD8 T", show_x=False)
+    stacked_bar(ax_cd4, mask_cd4, cd4_title, "CD4 T & Treg", show_x=True)
+
+    # connectors from each region's outer corners to its bar
+    for top, bottom, bar_ax in [((c8_x, ylim[1]), (c8_x, c8_y), ax_cd8), ((xlim[1], c4_y), (xlim[1], ylim[0]), ax_cd4)]:
+        for corner, yb in [(top, 1.0), (bottom, 0.0)]:
+            fig.add_artist(ConnectionPatch(xyA=corner, coordsA="data", axesA=ax_sc, xyB=(-connector_pad, yb),
+                                           coordsB="axes fraction", axesB=bar_ax, color="gray", linestyle="--",
+                                           linewidth=0.6, clip_on=False))
+
+    ax_leg.legend(handles=[Patch(facecolor=colors[c], label=c) for c in order], title="Cell type", loc="upper left",
+                  bbox_to_anchor=(0, 1), frameon=False, handlelength=0.8, handleheight=1, handletextpad=0.4,
+                  borderpad=0.2, borderaxespad=0)
+    return ax_sc, ax_cd8, ax_cd4
+
+
+def panel_C(ax, d):
+    df_long, cell_cols = sccoda_long_table(d.sccoda_data)
+    kw = dict(data=df_long, x="cell_type", y="rel_abundance", hue="origin", ax=ax)
+    sns.boxplot(**kw, showfliers=False, linewidth=0.6, width=0.7, palette=TUMOR_ADJACENT_PALETTE)
+    sns.stripplot(**kw, dodge=True, palette=["black"] * 2, size=2, jitter=True, legend=False)
+    ax.set_xlabel("")
+    ax.set_ylabel("% of CD45+ cells in sample", y=0.3)
+    ax.set_yticks([0, 0.1, 0.2, 0.3])
+    ax.yaxis.set_major_formatter(PercentFormatter(xmax=1, decimals=0))
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+
+    pairs = [((c, "adjacent"), (c, "tumor")) for c in ["Treg", "Plasma IgA+", "CD8 T"]]
+    annot = Annotator(ax, pairs, data=df_long, x="cell_type", y="rel_abundance", hue="origin")
+    annot.configure(test=None, text_format="star", loc="inside", verbose=0, fontsize=FS, line_width=0.6)
+    annot.set_custom_annotations(["**", "**", "*"])
+    annot.annotate()
+
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles[:2], labels[:2], frameon=False, loc="upper right")
+    ax.set_title("Cell type composition per sample")
+    return cell_cols
+
+
+def add_group_brackets(ax, groups, order, renderer, gap_pt=3, tick_pt=3):
+    """Brackets a fixed number of points below the lowest x tick label (stable when the layout is resized)."""
+    fig = ax.figure
+    lowest = min(t.get_window_extent(renderer).y0 for t in ax.get_xticklabels() if t.get_text())
+    depth_pt = (ax.transAxes.transform((0, 0))[1] - lowest) * 72 / fig.dpi + gap_pt
+    tr = blended_transform_factory(ax.transData, ax.transAxes) + ScaledTranslation(0, -depth_pt / 72, fig.dpi_scale_trans)
+    line = dict(arrowstyle="-", lw=0.8, color="black", shrinkA=0, shrinkB=0)
+    for label, members in groups.items():
+        pos = [order.index(m) for m in members if m in order]
+        if not pos:
+            continue
+        x0, x1 = min(pos) - 0.3, max(pos) + 0.3
+        ax.annotate("", xy=(x0, 0), xycoords=tr, xytext=(x1, 0), textcoords=tr, arrowprops=line, annotation_clip=False)
+        for x in (x0, x1):
+            ax.annotate("", xy=(x, 0), xycoords=tr, xytext=(0, tick_pt), textcoords="offset points",
+                        arrowprops=line, annotation_clip=False)
+        ax.annotate(label, xy=((x0 + x1) / 2, 0), xycoords=tr, xytext=(0, -2), textcoords="offset points",
+                    ha="center", va="top", fontsize=FS, annotation_clip=False)
+
+
+def panel_D(ax, protein, annotation=L1):
+    mat, labels, spans, rows, tumor, adjacent = prepare_deseq_heatmap_data(protein, annotation)
+    sns.heatmap(mat, cmap="RdBu_r", center=0, vmin=-2, vmax=2, xticklabels=labels, yticklabels=rows,
+                linewidths=0.3, linecolor="white", ax=ax,
+                cbar_kws={"pad": 0.015, "fraction": 0.025, "ticks": [-2, -1, 0, 1, 2]})
+    cbar = ax.collections[0].colorbar
+    cbar.set_label("Z-scored log2\n(DESeq-normalized counts)", fontsize=FS)
+    cbar.ax.tick_params(labelsize=FS, length=2)
+    cbar.outline.set_visible(False)
+    plt.setp(ax.get_xticklabels(), rotation=90, fontstyle="italic")
+    plt.setp(ax.get_yticklabels(), rotation=0)
+    _hide_blank_ticks(ax, labels, rows)
+
+    for x0, x1, cell_type in spans:
+        ax.plot([x0 + .1, x0 + .1, x1 - .1, x1 - .1], [-0.2, -0.5, -0.5, -0.2], color="k", lw=0.8, clip_on=False)
+        ax.text((x0 + x1) / 2, -0.65, cell_type, ha="center", va="bottom", fontsize=FS, fontweight="bold")
+    for txt, yc in [("Tumor", len(tumor) / 2), ("Adjacent", len(tumor) + 1 + len(adjacent) / 2)]:
+        ax.annotate(txt, xy=(0, yc), xycoords=("axes fraction", "data"), xytext=(-42, 0), textcoords="offset points",
+                    rotation=90, va="center", ha="center", fontweight="bold", fontsize=FS)
+    ax.set_title("Differentially expressed genes, CRC vs adjacent normal colon", pad=20)
+
+
+def panel_E(ax, d):
+    t = d.t_cells_tcr
+    tab = pd.crosstab(t.obs[L1], t.obs["clonal_expansion"], normalize="index")
+    tab = tab.reindex(columns=t.obs["clonal_expansion"].cat.categories)
+    tab.plot(kind="bar", stacked=True, color=t.uns["clonal_expansion_colors"], width=0.75, edgecolor="none",
+             ax=ax, legend=False)
+    ax.set(xlabel="", ylabel="Fraction of T cells", title="Tumor T cell clonal expansion")
+    plt.setp(ax.get_xticklabels(), rotation=0)
+    ax.legend(title="Clonal\nexpansion", bbox_to_anchor=(1.02, 1), loc="upper left", frameon=False,
+              handlelength=1, handleheight=1)
+
+
+def panel_F(ax, ax_leg, adata, signatures=SIGNATURES, signature_colors=SIGNATURE_COLORS,
+            title="Tumor T cells by clonal expansion", ylabel="Signature score", yticks=None, connect_samples=False):
+    """Signature scores by clonal expansion: violins + single cells, sample means as colored dots."""
+    exp_order, sig_order = list(adata.obs["clonal_expansion"].cat.categories), list(signatures.values())
+    long = adata.obs[["sample", "clonal_expansion", *signatures]].melt(
+        id_vars=["sample", "clonal_expansion"], var_name="signature", value_name="score")
+    long["signature"] = long["signature"].map(signatures)
+    avg = long.groupby(["sample", "clonal_expansion", "signature"], observed=True, as_index=False)["score"].mean()
+
+    sample_cols = dict(zip(adata.obs["sample"].cat.categories, adata.uns["sample_colors"]))
+    samples = [s for s in sample_cols if s in set(avg["sample"])]
+    kw = dict(data=long, x="clonal_expansion", y="score", hue="signature", order=exp_order,
+              hue_order=sig_order, legend=False, ax=ax)
+
+    sns.violinplot(**kw, palette=signature_colors, inner=None, cut=0, density_norm="width", linewidth=0.6)
+    for coll in ax.collections:
+        coll.set_alpha(0.45)
+    n_violin = len(ax.collections)
+    sns.stripplot(**kw, palette={s: "black" for s in sig_order}, dodge=True, jitter=0.15, size=0.6)
+    for coll in ax.collections[n_violin:]:
+        if isinstance(coll, PathCollection):
+            coll.set_rasterized(True)   # keeps the PDF light
+
+    # sample means, dodged by signature and (slightly) by sample
+    sig_off = {s: -0.4 + 0.8 / len(sig_order) * (j + 0.5) for j, s in enumerate(sig_order)}
+    samp_off = dict(zip(samples, np.linspace(-0.05, 0.05, len(samples)))) if len(samples) > 1 else {samples[0]: 0}
+    for sample in samples:
+        for sig in sig_order:
+            dd = (avg[(avg["sample"] == sample) & (avg["signature"] == sig)]
+                  .set_index("clonal_expansion").reindex(exp_order).dropna(subset=["score"]))
+            xs = [exp_order.index(e) + sig_off[sig] + samp_off[sample] for e in dd.index]
+            if connect_samples:
+                ax.plot(xs, dd["score"], color=sample_cols[sample], lw=0.8, alpha=0.7, zorder=9)
+            ax.scatter(xs, dd["score"], s=22, color=sample_cols[sample], edgecolor="black", linewidth=0.5, zorder=10)
+
+    ax.set(title=title, xlabel="", ylabel=ylabel, xticks=range(len(exp_order)))
+    ax.set_xticklabels(exp_order)
+    if yticks is not None:
+        ax.set_yticks(yticks)
+
+    sig_handles = [Patch(facecolor=signature_colors[s], alpha=0.45, edgecolor="black", label=s) for s in sig_order]
+    sample_handles = [Line2D([], [], marker="o", ls="", markersize=5, markerfacecolor=sample_cols[s],
+                             markeredgecolor="black", markeredgewidth=0.5, label=s) for s in samples]
+    leg = ax_leg.legend(handles=sig_handles, title="Signature", loc="upper left", bbox_to_anchor=(0, 1),
+                        frameon=False, borderaxespad=0, handlelength=1, handleheight=1)
+    ax_leg.add_artist(leg)
+    ax_leg.legend(handles=sample_handles, title="Sample mean", loc="upper left", bbox_to_anchor=(0, 0.5),
+                  frameon=False, borderaxespad=0)
+
+
+def make_figure_4(protein, rna, save=True, fig_dir=FIG_DIR, fig_name="figure_4_v0"):
+    """Multi-panel Figure 4 (A-F); saves PNG + PDF to `fig_dir`."""
+    d = prepare_figure_data(protein, rna)
+    plt.rcdefaults()
+    plt.rcParams.update(FIG_RCPARAMS)
+
+    # constrained layout for A, C, D, E, F; B is placed by hand afterwards
+    fig = plt.figure(figsize=(FIG_W_IN, FIG_H_IN), layout="constrained")
+    fig.get_layout_engine().set(w_pad=2 / 72, h_pad=4 / 72, wspace=0.02, hspace=0.02)
+    gs = fig.add_gridspec(4, 1, height_ratios=ROW_HEIGHTS)
+
+    row1 = gs[0].subgridspec(1, 2, width_ratios=[1.0, 1.7], wspace=0.04)   # A | B
+    ax_A, ax_B = fig.add_subplot(row1[0]), fig.add_subplot(row1[1])
+    ax_B.axis("off")
+    ax_C, ax_D = fig.add_subplot(gs[1]), fig.add_subplot(gs[2])
+    row4 = gs[3].subgridspec(1, 3, width_ratios=[0.75, 1.9, 0.5], wspace=0.04)   # E | F | legends
+    ax_E, ax_F, ax_leg = (fig.add_subplot(row4[i]) for i in range(3))
+    ax_leg.axis("off")
+
+    panel_A(ax_A, protein)
+    cell_cols = panel_C(ax_C, d)
+    panel_D(ax_D, protein)
+    panel_E(ax_E, d)
+    panel_F(ax_F, ax_leg, d.rna_t, yticks=[0, 0.5, 1, 1.5])
+
+    # draw once to measure C's tick labels for the brackets, again so the layout reserves their space, then freeze it
+    fig.canvas.draw()
+    add_group_brackets(ax_C, SCCODA_GROUPS, cell_cols, fig.canvas.get_renderer())
+    fig.canvas.draw()
+    fig.set_layout_engine("none")
+    fig.canvas.draw()
+
+    # align the left edges (tick labels included) of A, C, D, E; the right edges stay
+    renderer, inv = fig.canvas.get_renderer(), fig.transFigure.inverted()
+    left_axes = [ax_A, ax_C, ax_D, ax_E]
+    tight_x0 = [a.get_tightbbox(renderer).transformed(inv).x0 for a in left_axes]
+    target = max(min(tight_x0), 0.002)
+    for a, x0 in zip(left_axes, tight_x0):
+        pos, shift = a.get_position(), target - x0
+        a.set_position([pos.x0 + shift, pos.y0, pos.width - shift, pos.height])
+
+    ax_B_axes = panel_B(fig, ax_B, protein, d)
+    fig.canvas.draw()
+
+    def panel_labels(row):
+        """row = [(letter, [axes]), ...]; the letters share one height, at the top of the highest element."""
+        bbs = {L: [a.get_tightbbox(renderer).transformed(inv) for a in axs] for L, axs in row}
+        y = max(b.y1 for v in bbs.values() for b in v)
+        for L, bb in bbs.items():
+            fig.text(max(min(b.x0 for b in bb), 0.002), y, L, fontsize=FS, fontweight="bold", ha="left", va="top")
+
+    panel_labels([("A", [ax_A]), ("B", list(ax_B_axes))])
+    panel_labels([("C", [ax_C])])
+    panel_labels([("D", [ax_D])])
+    panel_labels([("E", [ax_E]), ("F", [ax_F])])
+
+    if save:   # no bbox_inches="tight" so the page size stays exact
+        for ext in ("png", "pdf"):
+            fig.savefig(f"{fig_dir}/{fig_name}.{ext}", dpi=600)
+    plt.show()
+    plt.rcdefaults()
+    return fig
